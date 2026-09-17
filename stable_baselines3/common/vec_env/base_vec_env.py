@@ -292,7 +292,7 @@ class VecEnv(ABC):
     def seed(self, seed: int | None = None) -> Sequence[int | None]:
         """
         Sets the random seeds for all environments, based on a given seed.
-        Each individual environment will still get its own seed, by incrementing the given seed.
+        Each individual environment will still get its own seed, derived from the given seed using a SeedSequence to ensure independent RNG streams.
         WARNING: since gym 0.26, those seeds will only be passed to the environment
         at the next reset.
 
@@ -305,7 +305,14 @@ class VecEnv(ABC):
             # we still populate the seed variable when no argument is passed
             seed = int(np.random.randint(0, np.iinfo(np.uint32).max, dtype=np.uint32))
 
-        self._seeds = [seed + idx for idx in range(self.num_envs)]
+        # Use SeedSequence to spawn independent child seeds for each environment.
+        # This ensures that adjacent base seeds (e.g., 0 and 1) produce disjoint
+        # RNG streams, unlike the previous seed + idx approach which caused overlap
+        # (e.g., seed=0 -> [0,1,2,3], seed=1 -> [1,2,3,4], sharing 3 of 4 seeds).
+        self._seeds = [
+            int(child.generate_state(1, dtype=np.uint32)[0])
+            for child in np.random.SeedSequence(seed).spawn(self.num_envs)
+        ]
         return self._seeds
 
     def set_options(self, options: list[dict] | dict | None = None) -> None:
