@@ -32,14 +32,16 @@ def _worker(  # noqa: C901
         try:
             cmd, data = remote.recv()
             if cmd == "step":
-                observation, reward, terminated, truncated, info = env.step(data)
+                action, seed, options = data
+                observation, reward, terminated, truncated, info = env.step(action)
                 # convert to SB3 VecEnv api
                 done = terminated or truncated
                 info["TimeLimit.truncated"] = truncated and not terminated
                 if done:
                     # save final observation where user can get it, then reset
                     info["terminal_observation"] = observation
-                    observation, reset_info = env.reset()
+                    maybe_options = {"options": options} if options else {}
+                    observation, reset_info = env.reset(seed=seed, **maybe_options)
                 remote.send((observation, reward, done, info, reset_info))
             elif cmd == "reset":
                 maybe_options = {"options": data[1]} if data[1] else {}
@@ -85,13 +87,13 @@ class SubprocVecEnv(VecEnv):
     number of logical cores on your CPU.
 
     .. warning::
-
         Only 'forkserver' and 'spawn' start methods are thread-safe,
         which is important when TensorFlow sessions or other non thread-safe
         libraries are used in the parent (see issue #217). However, compared to
         'fork' they incur a small start-up cost and have restrictions on
         global variables. With those methods, users must wrap the code in an
         ``if __name__ == "__main__":`` block.
+
         For more information, see the multiprocessing documentation.
 
     :param env_fns: Environments to run in subprocesses
@@ -104,7 +106,6 @@ class SubprocVecEnv(VecEnv):
         self.waiting = False
         self.closed = False
         n_envs = len(env_fns)
-
         if start_method is None:
             # Fork is not a thread safe method (see issue #217)
             # but is more user friendly (does not require to wrap the code in
@@ -125,18 +126,22 @@ class SubprocVecEnv(VecEnv):
 
         self.remotes[0].send(("get_spaces", None))
         observation_space, action_space = self.remotes[0].recv()
-
         super().__init__(len(env_fns), observation_space, action_space)
 
     def step_async(self, actions: np.ndarray) -> None:
-        for remote, action in zip(self.remotes, actions, strict=True):
-            remote.send(("step", action))
+        for env_idx, (remote, action) in enumerate(zip(self.remotes, actions, strict=True)):
+            remote.send(("step", (action, self._seeds[env_idx], self._options[env_idx])))
         self.waiting = True
 
     def step_wait(self) -> VecEnvStepReturn:
         results = [remote.recv() for remote in self.remotes]
         self.waiting = False
         obs, rews, dones, infos, self.reset_infos = zip(*results, strict=True)  # type: ignore[assignment]
+        # Seeds and options are only used once per environment
+        for env_idx in range(self.num_envs):
+            if dones[env_idx]:
+                self._seeds[env_idx] = None
+                self._options[env_idx] = None
         return _stack_obs(obs, self.observation_space), np.stack(rews), np.stack(dones), infos  # type: ignore[return-value]
 
     def reset(self) -> VecEnvObs:
